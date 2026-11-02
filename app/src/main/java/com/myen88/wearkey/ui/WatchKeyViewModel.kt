@@ -18,6 +18,8 @@ import com.myen88.wearkey.protocol.KeyId
 import com.myen88.wearkey.protocol.Vin
 import com.myen88.wearkey.protocol.crypto.ProtocolException
 import com.myen88.wearkey.protocol.message.LockSnapshot
+import com.myen88.wearkey.session.AutoKeyBus
+import com.myen88.wearkey.session.AutoKeyService
 import com.myen88.wearkey.session.CommandForegroundService
 import com.myen88.wearkey.tile.KeyTileService
 import com.tesla.generated.vcsec.Vcsec
@@ -47,6 +49,12 @@ data class UiState(
     val bannerIsError: Boolean = false,
     val confirmClosure: String? = null,
     val confirmForget: Boolean = false,
+    val autoKey: Boolean = false,
+    val rssiFallback: Boolean = true,
+    val nearRssi: Int = -65,
+    val farRssi: Int = -85,
+    val farHoldSeconds: Int = 8,
+    val liveRssi: String = "RSSI —",
 )
 
 class WatchKeyViewModel(app: Application) : AndroidViewModel(app) {
@@ -60,6 +68,21 @@ class WatchKeyViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _state = MutableStateFlow(initialState())
     val state: StateFlow<UiState> = _state.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            AutoKeyBus.detail.collect { detail ->
+                val rssi = AutoKeyBus.rssi.value
+                val smoothed = AutoKeyBus.smoothed.value
+                val live = if (rssi == Int.MIN_VALUE) {
+                    detail
+                } else {
+                    "RSSI $rssi   avg $smoothed"
+                }
+                _state.value = _state.value.copy(liveRssi = live)
+            }
+        }
+    }
 
     fun onPermissionsChanged() {
         _state.value = initialState().copy(banner = _state.value.banner, bannerIsError = _state.value.bannerIsError)
@@ -143,6 +166,55 @@ class WatchKeyViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun drive() = confirmThen("drive", "Tap again for remote start. Use a PIN to Drive on the car.") {
+        launchCommand("Starting…") {
+            commander.drive(requireVin())
+            _state.value = _state.value.copy(banner = "Drive command sent.", bannerIsError = false)
+        }
+    }
+
+    fun setAutoKeyEnabled(enabled: Boolean) {
+        if (enabled && (!store.enrolled || store.vin.isNullOrBlank())) {
+            _state.value = _state.value.copy(banner = "Pair the watch before turning Auto key on.", bannerIsError = true)
+            return
+        }
+        store.autoKey = enabled
+        val app = getApplication<Application>()
+        if (enabled) AutoKeyService.start(app) else AutoKeyService.stop(app)
+        _state.value = _state.value.copy(autoKey = enabled, banner = if (enabled) "Auto key on." else "Auto key off.", bannerIsError = false)
+        updateTile()
+    }
+
+    fun toggleRssiFallback() {
+        val next = !store.rssiFallback
+        store.rssiFallback = next
+        _state.value = _state.value.copy(rssiFallback = next)
+    }
+
+    fun stepNear() {
+        val next = if (store.nearRssi >= -48) -78 else store.nearRssi + 3
+        store.nearRssi = next
+        if (store.farRssi >= next) store.farRssi = next - 12
+        _state.value = _state.value.copy(nearRssi = store.nearRssi, farRssi = store.farRssi)
+    }
+
+    fun stepFar() {
+        val next = if (store.farRssi <= -100) store.nearRssi - 8 else store.farRssi - 3
+        store.farRssi = next.coerceAtMost(store.nearRssi - 5)
+        _state.value = _state.value.copy(farRssi = store.farRssi)
+    }
+
+    fun stepHold() {
+        val next = when (store.farHoldSeconds) {
+            5 -> 8
+            8 -> 12
+            12 -> 20
+            else -> 5
+        }
+        store.farHoldSeconds = next
+        _state.value = _state.value.copy(farHoldSeconds = next)
+    }
+
     fun climate(on: Boolean) = launchCommand(if (on) "Turning climate on…" else "Turning climate off…") {
         commander.climate(requireVin(), on)
         _state.value = _state.value.copy(
@@ -182,6 +254,7 @@ class WatchKeyViewModel(app: Application) : AndroidViewModel(app) {
         when (command) {
             "unlock" -> unlock()
             "lock" -> lock()
+            "auto" -> setAutoKeyEnabled(!store.autoKey)
         }
     }
 
@@ -262,6 +335,11 @@ class WatchKeyViewModel(app: Application) : AndroidViewModel(app) {
             keyIsHardwareOnly = hardwareOnly,
             lockLabel = store.lastLock ?: "Lock unknown",
             batteryLabel = store.lastBattery?.let { "Battery $it" } ?: "Battery —",
+            autoKey = store.autoKey,
+            rssiFallback = store.rssiFallback,
+            nearRssi = store.nearRssi,
+            farRssi = store.farRssi,
+            farHoldSeconds = store.farHoldSeconds,
         )
     }
 

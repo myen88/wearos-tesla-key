@@ -17,7 +17,9 @@ import com.myen88.wearkey.data.WatchKeyStore
 
 class KeyTileService : TileService() {
     override fun onTileRequest(requestParams: RequestBuilders.TileRequest): ListenableFuture<TileBuilders.Tile> {
-        val lock = WatchKeyStore(this).lastLock ?: "Pair the watch"
+        val store = WatchKeyStore(this)
+        val lock = store.lastLock ?: "Pair the watch"
+        val auto = if (store.autoKey) "Auto on" else "Auto off"
         val tile = TileBuilders.Tile.Builder()
             .setResourcesVersion(RESOURCES)
             .setTileTimeline(
@@ -26,7 +28,7 @@ class KeyTileService : TileService() {
                         TimelineBuilders.TimelineEntry.Builder()
                             .setLayout(
                                 LayoutElementBuilders.Layout.Builder()
-                                    .setRoot(layout(lock))
+                                    .setRoot(layout(lock, auto))
                                     .build(),
                             )
                             .build(),
@@ -45,14 +47,15 @@ class KeyTileService : TileService() {
         )
     }
 
-    private fun layout(lock: String): LayoutElementBuilders.LayoutElement {
+    private fun layout(lock: String, auto: String): LayoutElementBuilders.LayoutElement {
         return LayoutElementBuilders.Column.Builder()
             .setWidth(DimensionBuilders.expand())
             .setHeight(DimensionBuilders.expand())
             .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
             .addContent(label(lock, 14f, null))
-            .addContent(label("Unlock", 18f, click("unlock")))
-            .addContent(label("Lock", 18f, click("lock")))
+            .addContent(label("Unlock", 16f, click("unlock")))
+            .addContent(label("Lock", 16f, click("lock")))
+            .addContent(label(auto, 14f, click("auto")))
             .build()
     }
 

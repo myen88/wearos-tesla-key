@@ -51,13 +51,23 @@ interface VehicleLink {
         timeout: Duration,
         accept: (ByteArray) -> Decision,
     ): ByteArray
+
+    suspend fun poll(timeout: Duration): ByteArray?
+
+    suspend fun readRssi(): Int
+
+    suspend fun send(bytes: ByteArray)
+
+    fun isConnected(): Boolean
+
+    suspend fun preferLowPower()
 }
 
 class TeslaBleClient(context: Context) {
     private val appContext = context.applicationContext
 
-    suspend fun <T> use(vin: String, block: suspend (VehicleLink) -> T): T {
-        val link = connect(vin)
+    suspend fun <T> use(vin: String, patient: Boolean = false, block: suspend (VehicleLink) -> T): T {
+        val link = connect(vin, patient)
         try {
             return block(link)
         } finally {
@@ -66,7 +76,7 @@ class TeslaBleClient(context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    private suspend fun connect(vin: String): GattLink {
+    private suspend fun connect(vin: String, patient: Boolean): GattLink {
         val manager = appContext.getSystemService(BluetoothManager::class.java)
             ?: throw ProtocolException("This watch has no Bluetooth radio.")
         val adapter = manager.adapter ?: throw ProtocolException("This watch has no Bluetooth radio.")
@@ -75,8 +85,19 @@ class TeslaBleClient(context: Context) {
         }
         val name = Advertisement.localName(vin)
         Log.i(TAG, "Scanning for the vehicle advertisement")
-        val device = within(20.seconds, "No car with that VIN is advertising. Stand next to the car.") {
-            scan(adapter, name)
+        val device = if (!patient) {
+            within(20.seconds, "No car with that VIN is advertising. Stand next to the car.") {
+                scan(adapter, name, ScanSettings.SCAN_MODE_LOW_LATENCY)
+            }
+        } else {
+            val quick = runCatching {
+                within(8.seconds, "still looking") {
+                    scan(adapter, name, ScanSettings.SCAN_MODE_LOW_LATENCY)
+                }
+            }.getOrNull()
+            quick ?: within(40.seconds, "No car with that VIN is advertising.") {
+                scan(adapter, name, ScanSettings.SCAN_MODE_LOW_POWER)
+            }
         }
         val link = GattLink(appContext, device)
         try {
@@ -89,7 +110,7 @@ class TeslaBleClient(context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    private suspend fun scan(adapter: BluetoothAdapter, name: String): BluetoothDevice {
+    private suspend fun scan(adapter: BluetoothAdapter, name: String, mode: Int): BluetoothDevice {
         val scanner = adapter.bluetoothLeScanner
             ?: throw ProtocolException("Bluetooth scanning is unavailable.")
         return suspendCancellableCoroutine { continuation ->
@@ -110,7 +131,7 @@ class TeslaBleClient(context: Context) {
                 }
             }
             val settings = ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .setScanMode(mode)
                 .build()
             try {
                 scanner.startScan(null, settings, callback)
@@ -160,7 +181,9 @@ private class GattLink(
     private val incoming = Channel<ByteArray>(capacity = 32)
     private val reassembler = Reassembler()
     private val closed = AtomicBoolean(false)
+    private val connected = AtomicBoolean(false)
     private var gatt: BluetoothGatt? = null
+    private var rssiSlot: CompletableDeferred<Int>? = null
     private var writeCharacteristic: BluetoothGattCharacteristic? = null
     private var writeSlot: CompletableDeferred<Int>? = null
     private var mtu = 23
@@ -168,7 +191,13 @@ private class GattLink(
 
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            connected.set(newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS)
             events.trySend(GattEvent.Connection(status, newState))
+        }
+
+        override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
+            rssiSlot?.complete(if (status == BluetoothGatt.GATT_SUCCESS) rssi else Int.MIN_VALUE)
+            rssiSlot = null
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
@@ -264,7 +293,32 @@ private class GattLink(
             event is GattEvent.Descriptor && event.status == BluetoothGatt.GATT_SUCCESS
         }
         onGatt { gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) }
+        connected.set(true)
         Log.i(TeslaBleClient.TAG, "Connected, MTU $mtu")
+    }
+
+    override suspend fun poll(timeout: Duration): ByteArray? = try {
+        withTimeoutOrNull(timeout) { incoming.receive() }
+    } catch (_: kotlinx.coroutines.channels.ClosedReceiveChannelException) {
+        null
+    }
+
+    override suspend fun readRssi(): Int {
+        val deferred = CompletableDeferred<Int>()
+        rssiSlot = deferred
+        val started = onGatt { gatt?.readRemoteRssi() == true }
+        if (!started) return Int.MIN_VALUE
+        return withTimeoutOrNull(2.seconds) { deferred.await() } ?: Int.MIN_VALUE
+    }
+
+    override suspend fun send(bytes: ByteArray) {
+        writeFrame(BleFrames.encode(bytes))
+    }
+
+    override fun isConnected(): Boolean = connected.get() && !closed.get()
+
+    override suspend fun preferLowPower() {
+        onGatt { gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER) }
     }
 
     override suspend fun exchange(

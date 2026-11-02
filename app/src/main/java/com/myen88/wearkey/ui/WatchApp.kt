@@ -1,6 +1,10 @@
 package com.myen88.wearkey.ui
 
 import android.Manifest
+import android.content.Intent
+import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
 import android.text.InputFilter
 import android.text.InputType
 import android.widget.EditText
@@ -16,6 +20,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
@@ -44,10 +49,17 @@ fun WatchApp(
     model: WatchKeyViewModel = viewModel(),
 ) {
     val state by model.state.collectAsState()
+    val context = LocalContext.current
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) {
         model.onPermissionsChanged()
+    }
+    val autoPerms = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        model.setAutoKeyEnabled(true)
+        askUnrestrictedBattery(context)
     }
     LaunchedEffect(pendingCommand, state.screen) {
         if (pendingCommand != null && state.screen != Screen.PERMISSION) {
@@ -158,7 +170,42 @@ fun WatchApp(
                         item { ActionChip("Open frunk", enabled = !state.busy, onClick = model::frunk) }
                         item { ActionChip("Climate on", enabled = !state.busy) { model.climate(true) } }
                         item { ActionChip("Climate off", enabled = !state.busy) { model.climate(false) } }
+                        item { ActionChip("Drive", enabled = !state.busy, onClick = model::drive) }
                         item { ActionChip("Refresh", enabled = !state.busy, onClick = model::refresh) }
+                        item {
+                            ActionChip(
+                                label = if (state.autoKey) "Auto key on" else "Auto key off",
+                                primary = state.autoKey,
+                                enabled = !state.busy,
+                            ) {
+                                if (state.autoKey) {
+                                    model.setAutoKeyEnabled(false)
+                                } else {
+                                    autoPerms.launch(
+                                        arrayOf(
+                                            Manifest.permission.BLUETOOTH_SCAN,
+                                            Manifest.permission.BLUETOOTH_CONNECT,
+                                            Manifest.permission.POST_NOTIFICATIONS,
+                                            Manifest.permission.ACCESS_FINE_LOCATION,
+                                            Manifest.permission.ACCESS_BACKGROUND_LOCATION,
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+                        if (state.autoKey) {
+                            item { Text(state.liveRssi, style = MaterialTheme.typography.caption1) }
+                            item { ActionChip("Near ${state.nearRssi}", enabled = !state.busy, onClick = model::stepNear) }
+                            item { ActionChip("Far ${state.farRssi}", enabled = !state.busy, onClick = model::stepFar) }
+                            item { ActionChip("Hold ${state.farHoldSeconds}s", enabled = !state.busy, onClick = model::stepHold) }
+                            item {
+                                ActionChip(
+                                    label = if (state.rssiFallback) "Signal unlock on" else "Signal unlock off",
+                                    enabled = !state.busy,
+                                    onClick = model::toggleRssiFallback,
+                                )
+                            }
+                        }
                         item {
                             Text(
                                 "Key ${state.fingerprint}",
@@ -245,6 +292,16 @@ private fun VinField(value: String, onChange: (String) -> Unit) {
             }
         },
     )
+}
+
+private fun askUnrestrictedBattery(context: android.content.Context) {
+    val power = context.getSystemService(PowerManager::class.java)
+    if (power.isIgnoringBatteryOptimizations(context.packageName)) return
+    val intent = Intent(
+        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+        Uri.parse("package:${context.packageName}"),
+    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { context.startActivity(intent) }
 }
 
 private class SimpleWatcher(val onChange: (String) -> Unit) : android.text.TextWatcher {

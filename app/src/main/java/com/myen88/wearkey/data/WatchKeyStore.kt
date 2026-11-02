@@ -38,6 +38,42 @@ class WatchKeyStore(context: Context) {
             prefs.edit().putString(KEY_BATTERY, value).apply()
         }
 
+    var autoKey: Boolean
+        get() = prefs.getBoolean(KEY_AUTO, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_AUTO, value).apply()
+        }
+
+    var rssiFallback: Boolean
+        get() = prefs.getBoolean(KEY_RSSI_FALLBACK, true)
+        set(value) {
+            prefs.edit().putBoolean(KEY_RSSI_FALLBACK, value).apply()
+        }
+
+    var nearRssi: Int
+        get() = prefs.getInt(KEY_NEAR, -65)
+        set(value) {
+            prefs.edit().putInt(KEY_NEAR, value).apply()
+        }
+
+    var farRssi: Int
+        get() = prefs.getInt(KEY_FAR, -85)
+        set(value) {
+            prefs.edit().putInt(KEY_FAR, value).apply()
+        }
+
+    var farHoldSeconds: Int
+        get() = prefs.getInt(KEY_HOLD, 8)
+        set(value) {
+            prefs.edit().putInt(KEY_HOLD, value).apply()
+        }
+
+    var passiveCounter: Int
+        get() = prefs.getInt(KEY_PASSIVE_COUNTER, 1)
+        set(value) {
+            prefs.edit().putInt(KEY_PASSIVE_COUNTER, value).commit()
+        }
+
     fun save(snapshot: SessionSnapshot) {
         val prefix = prefix(snapshot.domain)
         prefs.edit()
@@ -89,5 +125,11 @@ class WatchKeyStore(context: Context) {
         private const val KEY_FORM = "android_form_factor"
         private const val KEY_LOCK = "last_lock"
         private const val KEY_BATTERY = "last_battery"
+        private const val KEY_AUTO = "auto_key"
+        private const val KEY_RSSI_FALLBACK = "rssi_fallback"
+        private const val KEY_NEAR = "near_rssi"
+        private const val KEY_FAR = "far_rssi"
+        private const val KEY_HOLD = "far_hold_seconds"
+        private const val KEY_PASSIVE_COUNTER = "passive_counter"
     }
 }

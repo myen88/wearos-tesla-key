@@ -70,27 +70,61 @@ The fingerprint on the watch is the first 8 bytes of SHA-1 of the uncompressed p
 
 ## Controls
 
-- Unlock, lock.
+- Unlock, lock, and Drive (remote start, second tap). Prefer PIN to Drive on the car.
 - Open trunk, open frunk. The second tap sends the command, so a stray tap does not pop the trunk. The command is `CLOSURE_MOVE_TYPE_OPEN`, not a toggle.
 - Climate on and climate off (infotainment).
 - Refresh reads VCSEC closure status and, if infotainment answers, battery percent (`battery_level`, otherwise `usable_battery_level`).
 - The Watch Key tile has Unlock and Lock. The Unlock complication does the same. Both open this app and send the command. That is one tap, and the watch has to be in BLE range. It is not walk-up unlock.
 
-## Walk-up unlock
+## Auto key
 
-Not implemented, and not something this app can honestly promise.
+Auto key is off until you turn it on. It is the walk-up path, modeled on how phone-key apps such as Tessie describe their watch key: stay connected to the car, and let the car decide from that link's signal. There is a second path in this app for when the car does not do that by itself.
 
-Tesla's phone key, per the owner's manual, is a presence key: the car sees the phone over Bluetooth, the doors unlock when you pull a handle, and walk-away lock can lock the car as you leave. That presence protocol is not the authenticated command channel documented in vehicle-command.
+### What is confirmed
 
-What the published spec does define is the flow this app uses: the watch scans for the car, connects as a GATT client, handshakes, and sends an authenticated command. Tesla engineers have said the car also emits short messages used for passive phone-key authentication, and they did not publish that format (vehicle-command issue 390). Guessing an advertisement and hoping the car treats the watch as a phone key would be unreliable and could interfere with the real phone key.
+- The BLE name, GATT service, and write/notify characteristics are in Tesla's vehicle-command spec.
+- VCSEC accepts an authenticated session on that link and will run RKE unlock, lock, and remote drive (`RKE_ACTION_REMOTE_DRIVE`) for an enrolled key. The Drive button sends remote drive. Turn on PIN to Drive in the car if the watch might be near the car while someone else is in the seat.
+- A foreground service of type `connectedDevice`, plus a partial wake lock, is what keeps the watch's radio up after the screen sleeps. Wear OS will not keep a BLE client connected in the background without that. The notification is low priority and persistent.
+- The first scan is low latency for about eight seconds, then low power. After a drop, the service reconnects with backoff up to 30 seconds. A button command pauses Auto key, uses the radio, then Auto key connects again.
+- VCSEC only keeps about three BLE links. Do not run the official Tesla app's phone key on this same watch at the same time. The two apps will fight over the radio and over those slots.
 
-Wear OS makes a background imitation even less attractive:
+### What is speculative
 
-- Google has tightened background execution. Shipping Wear apps have dropped always-on Bluetooth modes because a long-running background process is no longer allowed. The supported shape is "open the app, or tap a tile, then connect."
-- A foreground service can keep a radio up for a few seconds. Leaving one running so the watch is always connected fights the VCSEC limit of three simultaneous links (phone key, key fobs, and this watch) and will drain a Pixel Watch.
-- Background advertising as a BLE peripheral is restricted as well, and the bytes the car expects are not in the spec.
+The official vehicle-command protos at the pinned commit do not define the phone-key presence challenge. Public captures (VCSEC app protos around 4.20, and the NDSS 2023 phone-key paper) show the car sending a `FromVCSEC` authentication request with a token, and the phone answering a `ToVCSEC` signed message of type `SIGNATURE_TYPE_AES_GCM_TOKEN`. This app answers messages that match that layout:
 
-So the watch will not unlock the car as you walk up, and it will not walk-away lock. Use the app, the tile, or the complication when you are next to the car.
+- The AES key is the vehicle-command session key, `SHA-1(ECDH X)[:16]`. Older write-ups say "the ECDH shared secret" and do not spell out the SHA-1 step.
+- The nonce is 12 bytes, with the 4-byte counter in the last four bytes. The public notes only say the counter is four bytes. Java's AES-GCM wants a 12-byte nonce.
+- `keyId` is the first four bytes of SHA-1 of the watch public key, which those write-ups do agree on.
+- The level in the reply is the level the car asked for when the smoothed RSSI is at or above the near line, and `NONE` otherwise. The distance field is a hint derived from RSSI, not a measured range.
+
+If the car ignores that reply, it will not treat the watch as a present phone key no matter how long the GATT link stays up. That is the likely outcome on firmware that only speaks the newer session protocol. Treat "the car shows this key as connected" as something you have to check on your own car.
+
+### Signal fallback
+
+When "Signal unlock" is on (the default once Auto key is on), the watch also sends an authenticated RKE unlock or lock from RSSI:
+
+- Samples are averaged.
+- Crossing the near threshold sends one unlock. It will not unlock again until it has locked.
+- Staying at or below the far threshold for the hold time sends one lock. A short dip does not.
+- Commands are at least four seconds apart. A command that was rate-limited is sent later only if the watch is still on that side of the threshold.
+- Near, far, and hold are on the Auto key screen, next to a live RSSI line, so you can calibrate beside the car. Near must be a stronger signal than far. Tapping Near steps it; tapping Far steps the other way.
+
+This fallback does not make the car display the key as connected. It just sends the same lock and unlock the buttons send.
+
+### Setup
+
+1. Pair the watch first.
+2. Turn Auto key on. The watch asks for Bluetooth, notifications, fine location, and background location, then asks to ignore battery optimizations. The connection itself is held by the foreground service. Location is requested because some Wear builds still tie background scans to it. The scan is declared `neverForLocation`.
+3. Leave Bluetooth on. After a reboot the service starts again if Auto key is still on.
+4. The Watch Key tile has an Auto on/off line. It opens the app and flips the setting.
+
+Expect a real battery cost. A wake lock plus a BLE link is the opposite of the on-demand commands above. Turn Auto key off when you do not need walk-up.
+
+### Security
+
+A BLE presence key can be relayed: a pair of radios can make the car think the watch is next to it. This app does not add a distance bound the car can trust. PIN to Drive is the control that stops a relay from letting someone start the car. Unlock from a relay is still possible, which is the same class of limit as the official phone key.
+
+The Owner key on the watch can still authorize commands while Auto key is connected. A lost watch should have its key deleted on the car screen, and Auto key turned off.
 
 ## Security
 
@@ -159,7 +193,7 @@ If the scan finds nothing, stand closer, confirm the VIN, and confirm the car's 
 ./gradlew :protocol:test
 ```
 
-Covered without a car: advertisement name `S1a87a5a75f3df858C` for VIN `5YJS0000000000000`, the spec's ECDH key `1b2fce19967b79db696f909cff89ea9a`, session-info HMAC, HVAC AES-GCM ciphertext, routable-message fields, unlock's zero enum still on the wire, whitelist and lock-state parsing, frame reassembly, the response counter window, and VIN check digits.
+Covered without a car: advertisement name `S1a87a5a75f3df858C` for VIN `5YJS0000000000000`, the spec's ECDH key `1b2fce19967b79db696f909cff89ea9a`, session-info HMAC, HVAC AES-GCM ciphertext, routable-message fields, unlock's zero enum still on the wire, whitelist and lock-state parsing, frame reassembly, the response counter window, VIN check digits, the RSSI hysteresis state machine, and a round-trip of the speculative phone-key challenge encoding.
 
 Not covered: GATT on a watch, Android Keystore, card-tap timing, or whether a given firmware build accepts the Android-device form factor. Compare a failure with `tesla-control -ble -debug` from vehicle-command if you need a byte-level diff. Do not log or enroll the test keys.
 
@@ -171,7 +205,7 @@ Application code is MIT. See `LICENSE`.
 
 ## Limitations
 
-- No walk-up unlock and no walk-away lock. See above.
+- Auto key's phone-key challenge reply is speculative. The RSSI fallback is the part that does not depend on the car cooperating. See Auto key.
 - One car. The VIN is fixed after pairing until you remove the key on the watch and pair again.
 - Trunk and frunk are open commands. Closing them is not in this build.
 - Climate and battery depend on the infotainment computer being awake. Failure there does not block lock and unlock.

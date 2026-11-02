@@ -17,12 +17,20 @@ import com.myen88.wearkey.protocol.message.RoutableMessages
 import com.myen88.wearkey.protocol.message.VcsecCommands
 import com.myen88.wearkey.protocol.message.VcsecExpect
 import com.myen88.wearkey.protocol.message.VcsecInterpret
+import com.myen88.wearkey.protocol.message.PassiveAuth
 import com.myen88.wearkey.protocol.message.VcsecRead
+import com.myen88.wearkey.protocol.presence.PresenceCommand
+import com.myen88.wearkey.protocol.presence.PresenceConfig
+import com.myen88.wearkey.protocol.presence.PresenceController
 import com.myen88.wearkey.protocol.randomBytes
 import com.tesla.generated.universalmessage.UniversalMessage
 import com.tesla.generated.vcsec.Vcsec
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.sync.withLock
+import kotlin.coroutines.coroutineContext
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 class VehicleBusyException : ProtocolException("The car is busy. Try again.")
@@ -37,7 +45,7 @@ class VehicleCommander(
         formFactor: Vcsec.KeyFormFactor,
         onPhase: (String) -> Unit,
     ): String {
-        return ble.use(vin) { link ->
+        return onCar(vin) { link ->
             onPhase("Asking the car to add this key…")
             val routing = randomBytes(TeslaProtocol.ADDRESS_LENGTH)
             val uuid = randomBytes(TeslaProtocol.UUID_LENGTH)
@@ -72,11 +80,11 @@ class VehicleCommander(
     }
 
     suspend fun refresh(vin: String): CarReading = retryBusy {
-        ble.use(vin) { link -> Live(link, vin).reading(includeBattery = true) }
+        onCar(vin) { link -> Live(link, vin).reading(includeBattery = true) }
     }
 
     suspend fun lock(vin: String): LockSnapshot = retryBusy {
-        ble.use(vin) { link ->
+        onCar(vin) { link ->
             val live = Live(link, vin)
             live.rke(Vcsec.RKEAction_E.RKE_ACTION_LOCK)
             live.status()
@@ -84,7 +92,7 @@ class VehicleCommander(
     }
 
     suspend fun unlock(vin: String): LockSnapshot = retryBusy {
-        ble.use(vin) { link ->
+        onCar(vin) { link ->
             val live = Live(link, vin)
             live.rke(Vcsec.RKEAction_E.RKE_ACTION_UNLOCK)
             live.status()
@@ -92,7 +100,7 @@ class VehicleCommander(
     }
 
     suspend fun openTrunk(vin: String): LockSnapshot = retryBusy {
-        ble.use(vin) { link ->
+        onCar(vin) { link ->
             val live = Live(link, vin)
             live.closure(VcsecCommands.openTrunk())
             live.status()
@@ -100,7 +108,7 @@ class VehicleCommander(
     }
 
     suspend fun openFrunk(vin: String): LockSnapshot = retryBusy {
-        ble.use(vin) { link ->
+        onCar(vin) { link ->
             val live = Live(link, vin)
             live.closure(VcsecCommands.openFrunk())
             live.status()
@@ -109,9 +117,42 @@ class VehicleCommander(
 
     suspend fun climate(vin: String, on: Boolean) {
         retryBusy {
-            ble.use(vin) { link ->
+            onCar(vin) { link ->
                 Live(link, vin).infotainment(InfotainmentCommands.climate(on), needsData = false)
             }
+        }
+    }
+
+    suspend fun drive(vin: String) {
+        retryBusy {
+            onCar(vin) { link ->
+                Live(link, vin).rke(Vcsec.RKEAction_E.RKE_ACTION_REMOTE_DRIVE)
+            }
+        }
+    }
+
+    /**
+     * Holds the car link until Auto key is turned off or a button command
+     * asks for the radio. Reconnect and backoff live in the service loop.
+     */
+    suspend fun maintain(vin: String, listener: AutoKeyListener) {
+        if (!RadioGate.mutex.tryLock()) return
+        try {
+            if (RadioGate.yieldBackground || !store.autoKey) return
+            ble.use(vin, patient = true) { link ->
+                Live(link, vin).presenceLoop(listener)
+            }
+        } finally {
+            if (RadioGate.mutex.isLocked) RadioGate.mutex.unlock()
+        }
+    }
+
+    private suspend fun <T> onCar(vin: String, block: suspend (VehicleLink) -> T): T {
+        RadioGate.yieldBackground = true
+        return try {
+            RadioGate.mutex.withLock { ble.use(vin, block = block) }
+        } finally {
+            RadioGate.yieldBackground = false
         }
     }
 
@@ -231,6 +272,80 @@ class VehicleCommander(
             store.save(session.snapshot())
             return session
         }
+
+        suspend fun presenceLoop(listener: AutoKeyListener) {
+            handshake(vcsec)
+            link.preferLowPower()
+            var presence = controller()
+            var configKey = configKey()
+            while (coroutineContext.isActive && store.autoKey && !RadioGate.yieldBackground && link.isConnected()) {
+                val currentKey = configKey()
+                if (currentKey != configKey) {
+                    configKey = currentKey
+                    presence = controller()
+                }
+                val rssi = link.readRssi()
+                if (rssi != Int.MIN_VALUE && store.rssiFallback) {
+                    when (presence.onRssi(rssi, System.currentTimeMillis())) {
+                        PresenceCommand.UNLOCK -> rke(Vcsec.RKEAction_E.RKE_ACTION_UNLOCK)
+                        PresenceCommand.LOCK -> rke(Vcsec.RKEAction_E.RKE_ACTION_LOCK)
+                        null -> Unit
+                    }
+                }
+                val smoothed = presence.smoothed ?: rssi
+                listener.onSample(
+                    rssi = rssi,
+                    smoothed = smoothed,
+                    connected = true,
+                    detail = if (rssi == Int.MIN_VALUE) "Connected" else "Connected  RSSI $rssi",
+                )
+                val frame = link.poll(800.milliseconds) ?: continue
+                answerChallenge(frame, (presence.smoothed ?: -100) >= store.nearRssi, smoothed)
+            }
+        }
+
+        private suspend fun answerChallenge(frame: ByteArray, near: Boolean, rssi: Int) {
+            notePassiveCounter(frame)
+            val challenge = PassiveAuth.parseChallenge(frame) ?: return
+            val session = session(vcsec)
+            val level = PassiveAuth.responseLevel(challenge.requestedLevel, near)
+            val counter = store.passiveCounter
+            val response = PassiveAuth.signedResponse(
+                sharedKey = session.sharedKey,
+                counter = counter,
+                publicKey = key.publicUncompressed(),
+                token = challenge.token,
+                level = level,
+                estimatedDistance = PassiveAuth.distanceHint(rssi),
+            )
+            store.passiveCounter = counter + 1
+            link.send(response)
+        }
+
+        private fun notePassiveCounter(frame: ByteArray) {
+            val message = VcsecInterpret.parse(frame) ?: return
+            if (!message.hasCommandStatus() || !message.getCommandStatus().hasSignedMessageStatus()) return
+            val status = message.getCommandStatus().getSignedMessageStatus()
+            val fault = status.getSignedMessageInformation()
+            val retry = fault == Vcsec.SignedMessage_information_E.SIGNEDMESSAGE_INFORMATION_FAULT_IV_SMALLER_THAN_EXPECTED ||
+                fault == Vcsec.SignedMessage_information_E.SIGNEDMESSAGE_INFORMATION_FAULT_INVALID_TOKEN ||
+                fault == Vcsec.SignedMessage_information_E.SIGNEDMESSAGE_INFORMATION_FAULT_TOKEN_AND_COUNTER_INVALID
+            if (!retry) return
+            val carCounter = status.getCounter()
+            if (carCounter.toUInt() >= store.passiveCounter.toUInt()) {
+                store.passiveCounter = (carCounter.toUInt() + 1u).toInt()
+            }
+        }
+
+        private fun controller(): PresenceController = PresenceController(
+            PresenceConfig(
+                nearRssi = store.nearRssi,
+                farRssi = store.farRssi.coerceAtMost(store.nearRssi - 5),
+                farHoldMillis = store.farHoldSeconds.coerceIn(3, 60) * 1000L,
+            ),
+        )
+
+        private fun configKey(): String = "${store.nearRssi}:${store.farRssi}:${store.farHoldSeconds}:${store.rssiFallback}"
 
         private suspend fun unsignedStatus(): LockSnapshot? {
             val routing = randomBytes(TeslaProtocol.ADDRESS_LENGTH)
@@ -391,3 +506,7 @@ class VehicleCommander(
 }
 
 data class CarReading(val lock: LockSnapshot, val batteryPercent: Int?, val note: String?)
+
+fun interface AutoKeyListener {
+    fun onSample(rssi: Int, smoothed: Int, connected: Boolean, detail: String)
+}
