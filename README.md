@@ -136,6 +136,90 @@ The Owner key on the watch can still authorize commands while Auto key is connec
 - The unit tests embed Tesla's published test private keys from `protocol.md`. Those keys are public. Do not enroll them on a vehicle.
 - VCSEC allows about three concurrent BLE links. This app disconnects when the command finishes so it does not crowd out a phone key.
 
+## Set up your computer
+
+You need three things: a JDK (Java 17 or newer), the Android SDK (platform 35 plus build-tools), and `adb` (platform-tools) to install the APK on the watch. Pick your OS. No Android Studio is required, but if you already have it, its SDK works and you can skip to step 3.
+
+### macOS (Homebrew)
+
+```bash
+# 1. Java 17
+brew install openjdk@17
+sudo ln -sfn "$(brew --prefix)/opt/openjdk@17/libexec/openjdk.jdk" /Library/Java/JavaVirtualMachines/openjdk-17.jdk
+
+# 2. Android command-line tools, then the SDK pieces
+brew install --cask android-commandlinetools
+export ANDROID_HOME="$(brew --prefix)/share/android-commandlinetools"
+yes | sdkmanager --licenses
+sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+# 3. Make it permanent (zsh)
+cat >> ~/.zshrc <<'RC'
+export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
+export ANDROID_HOME="$(brew --prefix)/share/android-commandlinetools"
+export PATH="$ANDROID_HOME/platform-tools:$PATH"
+RC
+source ~/.zshrc
+```
+
+### Windows (PowerShell)
+
+```powershell
+# 1. Java 17
+winget install Microsoft.OpenJDK.17
+
+# 2. Android command-line tools: download "Command line tools only" from
+#    https://developer.android.com/studio#command-line-tools-only
+#    and unzip so the path is  %LOCALAPPDATA%\Android\Sdk\cmdline-tools\latest\bin
+$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
+& "$env:ANDROID_HOME\cmdline-tools\latest\bin\sdkmanager.bat" --licenses
+& "$env:ANDROID_HOME\cmdline-tools\latest\bin\sdkmanager.bat" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+# 3. Make it permanent, then open a new terminal
+setx ANDROID_HOME "$env:LOCALAPPDATA\Android\Sdk"
+setx PATH "$env:PATH;$env:LOCALAPPDATA\Android\Sdk\platform-tools"
+```
+
+On Windows, use `gradlew.bat` instead of `./gradlew` below.
+
+### Linux (Debian / Ubuntu)
+
+```bash
+# 1. Java 17
+sudo apt update && sudo apt install -y openjdk-17-jdk unzip
+
+# 2. Android command-line tools
+export ANDROID_HOME="$HOME/Android/Sdk"
+mkdir -p "$ANDROID_HOME/cmdline-tools" && cd /tmp
+curl -LO https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+unzip -q commandlinetools-linux-*_latest.zip && mv cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+# 3. Make it permanent
+echo 'export ANDROID_HOME="$HOME/Android/Sdk"' >> ~/.bashrc
+echo 'export PATH="$ANDROID_HOME/platform-tools:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Check it worked
+
+```bash
+java -version     # should say 17 or newer
+adb version       # should print a version, not "command not found"
+echo $ANDROID_HOME
+```
+
+Then clone and build:
+
+```bash
+git clone https://github.com/myen88/wearos-tesla-key.git
+cd wearos-tesla-key
+./gradlew test assembleDebug
+```
+
+The first build downloads Gradle 8.11.1 and dependencies, so it takes a few minutes.
+
 ## Build
 
 JDK 17 or newer, and Android SDK 35 (build-tools 34 or 35 are both fine).
