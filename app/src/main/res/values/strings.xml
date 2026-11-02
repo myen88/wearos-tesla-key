@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Watch Key</string>
+    <string name="tile_label">Watch Key</string>
+    <string name="complication_label">Unlock</string>
+    <string name="notification_channel">Car connection</string>
+    <string name="notification_title">Watch Key</string>
+</resources>

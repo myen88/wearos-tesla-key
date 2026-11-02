@@ -1,0 +1,6 @@
+Protocol buffer definitions vendored from
+https://github.com/teslamotors/vehicle-command
+commit d6239bf377b8a5859e8f5c9d64409df2a057934a
+
+Copyright Tesla Motors. Licensed under the Apache License, Version 2.0.
+The .proto files in protocol/src/main/proto are unmodified.

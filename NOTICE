@@ -1,0 +1,9 @@
+Watch Key
+Copyright 2026 myen88
+
+This project is licensed under the MIT License. See LICENSE.
+
+The files under protocol/src/main/proto are unmodified copies of the
+protocol buffer definitions from teslamotors/vehicle-command at commit
+d6239bf377b8a5859e8f5c9d64409df2a057934a, which is licensed under the
+Apache License, Version 2.0. See third_party/vehicle-command/LICENSE.
