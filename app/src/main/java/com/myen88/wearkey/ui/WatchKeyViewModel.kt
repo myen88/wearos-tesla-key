@@ -5,6 +5,7 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.os.PowerManager
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
@@ -16,6 +17,7 @@ import com.myen88.wearkey.domain.VehicleCommander
 import com.myen88.wearkey.keystore.AndroidKeystoreKey
 import com.myen88.wearkey.protocol.KeyId
 import com.myen88.wearkey.protocol.Vin
+import com.myen88.wearkey.protocol.ble.Advertisement
 import com.myen88.wearkey.protocol.crypto.ProtocolException
 import com.myen88.wearkey.protocol.message.LockSnapshot
 import com.myen88.wearkey.session.AutoKeyBus
@@ -30,7 +32,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 
-enum class Screen { PERMISSION, ONBOARDING, PAIRING, DASHBOARD }
+enum class Screen { PERMISSION, ONBOARDING, PAIRING, DASHBOARD, NEARBY }
+
+data class NearbyRow(val name: String, val rssi: Int, val matches: Boolean)
 
 data class UiState(
     val screen: Screen = Screen.ONBOARDING,
@@ -55,6 +59,10 @@ data class UiState(
     val farRssi: Int = -85,
     val farHoldSeconds: Int = 8,
     val liveRssi: String = "RSSI —",
+    val nearby: List<NearbyRow> = emptyList(),
+    val nearbyExpected: String = "",
+    val nearbyMatch: Boolean = false,
+    val returnScreen: Screen = Screen.DASHBOARD,
 )
 
 class WatchKeyViewModel(app: Application) : AndroidViewModel(app) {
@@ -166,6 +174,68 @@ class WatchKeyViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun applyVinExtra(raw: String) {
+        val error = Vin.validationError(raw)
+        if (error != null) {
+            _state.value = _state.value.copy(banner = error, bannerIsError = true)
+            return
+        }
+        val vin = Vin.normalize(raw)
+        store.vin = vin
+        _state.value = initialState().copy(banner = "VIN saved: $vin", bannerIsError = false)
+    }
+
+    fun openNearby() {
+        if (!ensureRadioReady()) return
+        val back = _state.value.screen
+        _state.value = _state.value.copy(
+            screen = Screen.NEARBY,
+            nearby = emptyList(),
+            nearbyMatch = false,
+            nearbyExpected = store.vin?.let { Advertisement.localName(it) }.orEmpty(),
+            returnScreen = if (back == Screen.NEARBY) _state.value.returnScreen else back,
+            banner = "Scanning for 15 seconds…",
+            bannerIsError = false,
+        )
+        launchCommand("Scanning for 15 seconds…") {
+            val survey = commander.survey()
+            val rows = survey.sightings.map { sighting ->
+                NearbyRow(
+                    name = sighting.name,
+                    rssi = sighting.rssi,
+                    matches = survey.expectedName.isNotEmpty() &&
+                        Advertisement.sameName(survey.expectedName, sighting.name),
+                )
+            }
+            val matched = rows.count { it.matches }
+            val empty = Advertisement.describeScanMiss(
+                survey.deviceCount,
+                emptyList(),
+                survey.expectedName.ifBlank { "(no VIN saved)" },
+            )
+            val ibeacon = if (survey.ibeaconWithoutTeslaName > 0) {
+                " ${survey.ibeaconWithoutTeslaName} iBeacon ad${if (survey.ibeaconWithoutTeslaName == 1) "" else "s"} had no Tesla name."
+            } else {
+                ""
+            }
+            _state.value = _state.value.copy(
+                screen = Screen.NEARBY,
+                nearby = rows,
+                nearbyExpected = survey.expectedName,
+                nearbyMatch = matched == 1,
+                banner = (if (rows.isEmpty()) empty else "Expected ${survey.expectedName.ifBlank { "(no VIN saved)" }}") + ibeacon,
+                bannerIsError = rows.isEmpty(),
+            )
+        }
+    }
+
+    fun closeNearby() {
+        val back = _state.value.returnScreen
+        _state.value = _state.value.copy(
+            screen = if (back == Screen.NEARBY || back == Screen.PERMISSION) Screen.DASHBOARD else back,
+        )
+    }
+
     fun drive() = confirmThen("drive", "Tap again for remote start. Use a PIN to Drive on the car.") {
         launchCommand("Starting…") {
             commander.drive(requireVin())
@@ -268,6 +338,7 @@ class WatchKeyViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun launchCommand(label: String, block: suspend () -> Unit) {
+        if (!ensureRadioReady()) return
         viewModelScope.launch {
             if (!gate.tryLock()) {
                 _state.value = _state.value.copy(banner = "Wait for the current command to finish.", bannerIsError = true)
@@ -367,7 +438,29 @@ class WatchKeyViewModel(app: Application) : AndroidViewModel(app) {
         return ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) ==
             PackageManager.PERMISSION_GRANTED &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) ==
+            PackageManager.PERMISSION_GRANTED &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
             PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun ensureRadioReady(): Boolean {
+        if (!hasBluetoothPermission()) {
+            _state.value = _state.value.copy(
+                screen = Screen.PERMISSION,
+                banner = "Allow Bluetooth and location before scanning for the car.",
+                bannerIsError = true,
+            )
+            return false
+        }
+        val locations = getApplication<Application>().getSystemService(LocationManager::class.java)
+        if (locations != null && !locations.isLocationEnabled) {
+            _state.value = _state.value.copy(
+                banner = "Location is off. Turn it on in watch settings. Android hides the car's Bluetooth name while Location is off.",
+                bannerIsError = true,
+            )
+            return false
+        }
+        return true
     }
 
     private fun beginForeground(text: String) {

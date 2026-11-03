@@ -46,6 +46,8 @@ import androidx.wear.compose.material.VignettePosition
 fun WatchApp(
     pendingCommand: String?,
     onCommandConsumed: () -> Unit,
+    pendingVin: String? = null,
+    onVinConsumed: () -> Unit = {},
     model: WatchKeyViewModel = viewModel(),
 ) {
     val state by model.state.collectAsState()
@@ -60,6 +62,11 @@ fun WatchApp(
     ) {
         model.setAutoKeyEnabled(true)
         askUnrestrictedBattery(context)
+    }
+    LaunchedEffect(pendingVin) {
+        val vin = pendingVin ?: return@LaunchedEffect
+        model.applyVinExtra(vin)
+        onVinConsumed()
     }
     LaunchedEffect(pendingCommand, state.screen) {
         if (pendingCommand != null && state.screen != Screen.PERMISSION) {
@@ -107,7 +114,7 @@ fun WatchApp(
                 when (state.screen) {
                     Screen.PERMISSION -> item {
                         ColumnCopy(
-                            "The watch needs Bluetooth to talk to the car directly. Nothing is sent to a server.",
+                            "Bluetooth and location are both required. Android hides the car's name unless location permission is allowed and Location is switched on.",
                         )
                     }
                     Screen.ONBOARDING -> {
@@ -133,6 +140,7 @@ fun WatchApp(
                         item {
                             ColumnCopy("Stand beside the car. When the screen prompts you, tap the key card on the center console and confirm.")
                         }
+                        item { ActionChip("Nearby cars", enabled = !state.busy, onClick = model::openNearby) }
                         item {
                             val label = if (state.androidFormFactor) "Key type: Android device" else "Key type: cloud key"
                             Chip(
@@ -141,6 +149,35 @@ fun WatchApp(
                                 label = { Text(label) },
                                 modifier = Modifier.fillParentMaxWidth(),
                             )
+                        }
+                    }
+                    Screen.NEARBY -> {
+                        item { Text("Nearby cars", style = MaterialTheme.typography.title3) }
+                        item {
+                            Text(
+                                "Expected ${state.nearbyExpected.ifBlank { "(no VIN saved)" }}",
+                                style = MaterialTheme.typography.caption1,
+                            )
+                        }
+                        if (state.nearbyMatch) {
+                            item {
+                                Text(
+                                    "Matches your VIN",
+                                    color = MaterialTheme.colors.secondary,
+                                    style = MaterialTheme.typography.title3,
+                                )
+                            }
+                        }
+                        if (state.nearby.isEmpty() && !state.busy) {
+                            item { ColumnCopy("No Tesla name (S…C) showed up.") }
+                        }
+                        state.nearby.forEach { row ->
+                            item {
+                                Text(
+                                    "${row.name}  ${row.rssi}" + if (row.matches) "  match" else "",
+                                    style = MaterialTheme.typography.caption1,
+                                )
+                            }
                         }
                     }
                     Screen.DASHBOARD -> {
@@ -172,6 +209,7 @@ fun WatchApp(
                         item { ActionChip("Climate off", enabled = !state.busy) { model.climate(false) } }
                         item { ActionChip("Drive", enabled = !state.busy, onClick = model::drive) }
                         item { ActionChip("Refresh", enabled = !state.busy, onClick = model::refresh) }
+                        item { ActionChip("Nearby cars", enabled = !state.busy, onClick = model::openNearby) }
                         item {
                             ActionChip(
                                 label = if (state.autoKey) "Auto key on" else "Auto key off",
@@ -223,11 +261,13 @@ fun WatchApp(
                                     Manifest.permission.BLUETOOTH_SCAN,
                                     Manifest.permission.BLUETOOTH_CONNECT,
                                     Manifest.permission.POST_NOTIFICATIONS,
+                                    Manifest.permission.ACCESS_FINE_LOCATION,
                                 ),
                             )
                         }
                         Screen.ONBOARDING -> ActionChip("Create key", primary = true, enabled = !state.busy, onClick = model::continueFromVin)
                         Screen.PAIRING -> ActionChip("Start pairing", primary = true, enabled = !state.busy && state.keyIsHardwareOnly, onClick = model::startPairing)
+                        Screen.NEARBY -> ActionChip("Back", enabled = !state.busy, onClick = model::closeNearby)
                         Screen.DASHBOARD -> {
                             if (state.confirmForget) {
                                 ActionChip("Remove key from watch", primary = false, enabled = !state.busy, onClick = model::forget)

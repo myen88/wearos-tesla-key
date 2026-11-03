@@ -114,7 +114,7 @@ This fallback does not make the car display the key as connected. It just sends 
 ### Setup
 
 1. Pair the watch first.
-2. Turn Auto key on. The watch asks for Bluetooth, notifications, fine location, and background location, then asks to ignore battery optimizations. The connection itself is held by the foreground service. Location is requested because some Wear builds still tie background scans to it. The scan is declared `neverForLocation`.
+2. Turn Auto key on. The watch asks for Bluetooth, notifications, fine location, and background location, then asks to ignore battery optimizations. The connection itself is held by the foreground service. Location must be allowed and switched on: Android hides iBeacon advertisements, which is how the car announces itself, when an app scans with `neverForLocation` or when Location is off.
 3. Leave Bluetooth on. After a reboot the service starts again if Auto key is still on.
 4. The Watch Key tile has an Auto on/off line. It opens the app and flips the setting.
 
@@ -265,11 +265,17 @@ Pixel Watch has no USB debugging port. Use Wi-Fi debugging. The watch and the co
    adb shell am start -n com.myen88.wearkey/.MainActivity
    ```
 
-6. Add the tile from the watch face editor (tiles > Watch Key). Add the complication on a face that supports short text; its label is Unlock.
+6. Set the VIN from the computer instead of typing it on the watch. The app checks the check digit, saves the normalized VIN, and shows "VIN saved" or the validation error.
 
-7. Remove it with `adb uninstall com.myen88.wearkey`, and delete the key on the car if it was enrolled.
+   ```bash
+   adb shell am start -n com.myen88.wearkey/.MainActivity --es vin YOUR_VIN
+   ```
 
-If the scan finds nothing, stand closer, confirm the VIN, and confirm the car's phone-key Bluetooth is enabled. Some watches mishandle BLE scan filters, so this app matches the local name in software instead of relying on a hardware filter.
+7. Add the tile from the watch face editor (tiles > Watch Key). Add the complication on a face that supports short text; its label is Unlock.
+
+8. Remove it with `adb uninstall com.myen88.wearkey`, and delete the key on the car if it was enrolled.
+
+The car advertises an Apple iBeacon next to the `S…C` local name. Scanning with `neverForLocation` drops those advertisements on Android, which is why this app asks for location and requires the watch Location toggle to be on. Pairing and every command use a low-latency scan of about 18 seconds with no hardware name filter. If nothing matches, the message says whether the scan saw no devices at all, or saw other Bluetooth devices and Tesla names. Nearby cars on the watch lists every `S` + 16 hex characters + `C` name and its RSSI, plus the name expected for the saved VIN. When exactly one of those names is that VIN, the screen says "Matches your VIN". An iBeacon by itself is not used as a VIN match: vehicle-command does not define that UUID from the VIN.
 
 ## Tests
 
@@ -277,7 +283,7 @@ If the scan finds nothing, stand closer, confirm the VIN, and confirm the car's 
 ./gradlew :protocol:test
 ```
 
-Covered without a car: advertisement name `S1a87a5a75f3df858C` for VIN `5YJS0000000000000`, the spec's ECDH key `1b2fce19967b79db696f909cff89ea9a`, session-info HMAC, HVAC AES-GCM ciphertext, routable-message fields, unlock's zero enum still on the wire, whitelist and lock-state parsing, frame reassembly, the response counter window, VIN check digits, the RSSI hysteresis state machine, and a round-trip of the speculative phone-key challenge encoding.
+Covered without a car: advertisement name `S1a87a5a75f3df858C` for VIN `5YJS0000000000000`, parsing complete and shortened local names, case-insensitive Tesla-name matching, the spec's ECDH key `1b2fce19967b79db696f909cff89ea9a`, session-info HMAC, HVAC AES-GCM ciphertext, routable-message fields, unlock's zero enum still on the wire, whitelist and lock-state parsing, frame reassembly, the response counter window, VIN check digits, the RSSI hysteresis state machine, and a round-trip of the speculative phone-key challenge encoding.
 
 Not covered: GATT on a watch, Android Keystore, card-tap timing, or whether a given firmware build accepts the Android-device form factor. Compare a failure with `tesla-control -ble -debug` from vehicle-command if you need a byte-level diff. Do not log or enroll the test keys.
 

@@ -14,9 +14,13 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.location.LocationManager
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import com.myen88.wearkey.BuildConfig
 import com.myen88.wearkey.protocol.TeslaProtocol
 import com.myen88.wearkey.protocol.ble.Advertisement
@@ -83,22 +87,18 @@ class TeslaBleClient(context: Context) {
         if (!adapter.isEnabled) {
             throw ProtocolException("Turn on Bluetooth in the watch settings.")
         }
+        requireScanEnvironment()
         val name = Advertisement.localName(vin)
         Log.i(TAG, "Scanning for the vehicle advertisement")
+        val tally = ScanTally()
         val device = if (!patient) {
-            within(20.seconds, "No car with that VIN is advertising. Stand next to the car.") {
-                scan(adapter, name, ScanSettings.SCAN_MODE_LOW_LATENCY)
-            }
+            scanCollect(adapter, name, ScanSettings.SCAN_MODE_LOW_LATENCY, 18.seconds, tally)
         } else {
-            val quick = runCatching {
-                within(8.seconds, "still looking") {
-                    scan(adapter, name, ScanSettings.SCAN_MODE_LOW_LATENCY)
-                }
-            }.getOrNull()
-            quick ?: within(40.seconds, "No car with that VIN is advertising.") {
-                scan(adapter, name, ScanSettings.SCAN_MODE_LOW_POWER)
-            }
-        }
+            scanCollect(adapter, name, ScanSettings.SCAN_MODE_LOW_LATENCY, 8.seconds, tally)
+                ?: scanCollect(adapter, name, ScanSettings.SCAN_MODE_LOW_POWER, 20.seconds, tally)
+        } ?: throw ProtocolException(
+            Advertisement.describeScanMiss(tally.deviceCount, tally.teslaNames(), name),
+        )
         val link = GattLink(appContext, device)
         try {
             link.open()
@@ -109,51 +109,85 @@ class TeslaBleClient(context: Context) {
         return link
     }
 
-    @SuppressLint("MissingPermission")
-    private suspend fun scan(adapter: BluetoothAdapter, name: String, mode: Int): BluetoothDevice {
-        val scanner = adapter.bluetoothLeScanner
-            ?: throw ProtocolException("Bluetooth scanning is unavailable.")
-        return suspendCancellableCoroutine { continuation ->
-            val callback = object : ScanCallback() {
-                override fun onScanResult(callbackType: Int, result: ScanResult) {
-                    if (!matches(result, name) || !continuation.isActive) return
-                    try {
-                        scanner.stopScan(this)
-                    } catch (_: SecurityException) {
-                    }
-                    continuation.resume(result.device)
-                }
+    suspend fun survey(vin: String?): ScanSurvey {
+        requireScanEnvironment()
+        val manager = appContext.getSystemService(BluetoothManager::class.java)
+            ?: throw ProtocolException("This watch has no Bluetooth radio.")
+        val adapter = manager.adapter ?: throw ProtocolException("This watch has no Bluetooth radio.")
+        if (!adapter.isEnabled) throw ProtocolException("Turn on Bluetooth in the watch settings.")
+        val expected = if (vin.isNullOrBlank()) "" else Advertisement.localName(vin)
+        val tally = ScanTally()
+        scanCollect(adapter, expected, ScanSettings.SCAN_MODE_LOW_LATENCY, 15.seconds, tally)
+        return ScanSurvey(
+            deviceCount = tally.deviceCount,
+            sightings = tally.sightings(),
+            ibeaconWithoutTeslaName = tally.ibeaconWithoutName,
+            expectedName = expected,
+        )
+    }
 
-                override fun onScanFailed(errorCode: Int) {
-                    if (continuation.isActive) {
-                        continuation.resumeWithException(ProtocolException(scanFailure(errorCode)))
-                    }
-                }
-            }
-            val settings = ScanSettings.Builder()
-                .setScanMode(mode)
-                .build()
-            try {
-                scanner.startScan(null, settings, callback)
-            } catch (error: SecurityException) {
-                continuation.resumeWithException(ProtocolException("Bluetooth permission was denied.", error))
-                return@suspendCancellableCoroutine
-            }
-            continuation.invokeOnCancellation {
-                try {
-                    scanner.stopScan(callback)
-                } catch (_: SecurityException) {
-                }
-            }
+    private fun requireScanEnvironment() {
+        val fine = ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_FINE_LOCATION)
+        if (fine != PackageManager.PERMISSION_GRANTED) {
+            throw ProtocolException(
+                "Allow location. Android hides the car's Bluetooth name until this app has location permission.",
+            )
+        }
+        val locations = appContext.getSystemService(LocationManager::class.java)
+        if (locations != null && !locations.isLocationEnabled) {
+            throw ProtocolException(
+                "Location is off. Turn it on in watch settings. Android hides the car's advertisement while Location is off.",
+            )
         }
     }
 
-    private fun matches(result: ScanResult, name: String): Boolean {
-        if (result.scanRecord?.deviceName == name) return true
-        return try {
-            result.device.name == name
-        } catch (_: SecurityException) {
-            false
+    @SuppressLint("MissingPermission")
+    private suspend fun scanCollect(
+        adapter: BluetoothAdapter,
+        expected: String,
+        mode: Int,
+        timeout: kotlin.time.Duration,
+        tally: ScanTally,
+    ): BluetoothDevice? {
+        val scanner = adapter.bluetoothLeScanner
+            ?: throw ProtocolException("Bluetooth scanning is unavailable.")
+        return withTimeoutOrNull(timeout) {
+            suspendCancellableCoroutine { continuation ->
+                val callback = object : ScanCallback() {
+                    override fun onScanResult(callbackType: Int, result: ScanResult) {
+                        if (tally.consider(result, expected) && continuation.isActive) {
+                            try {
+                                scanner.stopScan(this)
+                            } catch (_: SecurityException) {
+                            }
+                            continuation.resume(result.device)
+                        }
+                    }
+
+                    override fun onScanFailed(errorCode: Int) {
+                        if (continuation.isActive) {
+                            continuation.resumeWithException(ProtocolException(scanFailure(errorCode)))
+                        }
+                    }
+                }
+                val settings = ScanSettings.Builder()
+                    .setScanMode(mode)
+                    .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+                    .setReportDelay(0)
+                    .build()
+                try {
+                    scanner.startScan(null, settings, callback)
+                } catch (error: SecurityException) {
+                    continuation.resumeWithException(ProtocolException("Bluetooth permission was denied.", error))
+                    return@suspendCancellableCoroutine
+                }
+                continuation.invokeOnCancellation {
+                    try {
+                        scanner.stopScan(callback)
+                    } catch (_: SecurityException) {
+                    }
+                }
+            }
         }
     }
 
@@ -422,6 +456,54 @@ private class GattLink(
     }
 
     private fun uuid(value: String): UUID = UUID.fromString(value)
+}
+
+data class TeslaSighting(val name: String, val rssi: Int)
+
+data class ScanSurvey(
+    val deviceCount: Int,
+    val sightings: List<TeslaSighting>,
+    val ibeaconWithoutTeslaName: Int,
+    val expectedName: String,
+)
+
+@SuppressLint("MissingPermission")
+private class ScanTally {
+    private val addresses = HashSet<String>()
+    private val tesla = LinkedHashMap<String, Int>()
+    var ibeaconWithoutName: Int = 0
+        private set
+
+    val deviceCount: Int get() = addresses.size
+
+    fun teslaNames(): List<String> = tesla.keys.toList()
+
+    fun sightings(): List<TeslaSighting> = tesla.map { TeslaSighting(it.key, it.value) }
+
+    fun consider(result: ScanResult, expected: String): Boolean {
+        addresses.add(result.device.address)
+        val parsed = Advertisement.parse(result.scanRecord?.bytes)
+        val names = buildList {
+            addAll(parsed.names)
+            result.scanRecord?.deviceName?.let { add(it) }
+            try {
+                result.device.name?.let { add(it) }
+            } catch (_: SecurityException) {
+            }
+        }
+        val teslaNames = names.filter { Advertisement.isTeslaName(it) }
+        if (parsed.appleIBeacon && teslaNames.isEmpty()) ibeaconWithoutName += 1
+        for (name in teslaNames) {
+            val key = name.trim()
+            val previous = tesla.entries.firstOrNull { Advertisement.sameName(it.key, key) }
+            if (previous == null) {
+                tesla[key] = result.rssi
+            } else if (result.rssi > previous.value) {
+                tesla[previous.key] = result.rssi
+            }
+        }
+        return names.any { Advertisement.sameName(expected, it) }
+    }
 }
 
 private sealed interface GattEvent {

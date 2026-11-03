@@ -1,6 +1,7 @@
 package com.myen88.wearkey.domain
 
 import com.myen88.wearkey.ble.Decision
+import com.myen88.wearkey.ble.ScanSurvey
 import com.myen88.wearkey.ble.TeslaBleClient
 import com.myen88.wearkey.ble.VehicleLink
 import com.myen88.wearkey.data.WatchKeyStore
@@ -135,6 +136,16 @@ class VehicleCommander(
      * Holds the car link until Auto key is turned off or a button command
      * asks for the radio. Reconnect and backoff live in the service loop.
      */
+    suspend fun survey(): ScanSurvey {
+        val vin = store.vin
+        RadioGate.yieldBackground = true
+        return try {
+            RadioGate.mutex.withLock { ble.survey(vin) }
+        } finally {
+            RadioGate.yieldBackground = false
+        }
+    }
+
     suspend fun maintain(vin: String, listener: AutoKeyListener) {
         if (!RadioGate.mutex.tryLock()) return
         try {
