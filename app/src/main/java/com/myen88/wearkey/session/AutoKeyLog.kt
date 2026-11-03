@@ -1,5 +1,6 @@
 package com.myen88.wearkey.session
 
+import com.myen88.wearkey.protocol.presence.PresenceController
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,7 +31,7 @@ data class AutoKeyEvent(
 /** The Auto key service publishes its controller so a button can move the latches. */
 object AutoKeyPresence {
     @Volatile
-    var controller: com.myen88.wearkey.protocol.presence.PresenceController? = null
+    var controller: PresenceController? = null
 }
 
 /**
