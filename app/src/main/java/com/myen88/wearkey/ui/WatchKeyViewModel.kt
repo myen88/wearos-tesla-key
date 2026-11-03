@@ -20,6 +20,7 @@ import com.myen88.wearkey.protocol.Vin
 import com.myen88.wearkey.protocol.ble.Advertisement
 import com.myen88.wearkey.protocol.crypto.ProtocolException
 import com.myen88.wearkey.protocol.message.LockSnapshot
+import com.myen88.wearkey.protocol.message.RearTrunk
 import com.myen88.wearkey.session.AutoKeyBus
 import com.myen88.wearkey.session.AutoKeyService
 import com.myen88.wearkey.session.CommandForegroundService
@@ -47,6 +48,7 @@ data class UiState(
     val lockLabel: String = "Lock unknown",
     val asleep: Boolean? = null,
     val trunkOpen: Boolean = false,
+    val rearTrunk: RearTrunk = RearTrunk.UNKNOWN,
     val frunkOpen: Boolean = false,
     val batteryLabel: String = "Battery —",
     val banner: String? = null,
@@ -165,6 +167,12 @@ class WatchKeyViewModel(app: Application) : AndroidViewModel(app) {
     fun trunk() = confirmThen("trunk", "Tap again to open the trunk.") {
         launchCommand("Opening the trunk…") {
             applyReading(commander.openTrunk(requireVin()), battery = null, banner = "Trunk command sent.")
+        }
+    }
+
+    fun closeTrunk() = confirmThen("close-trunk", "Tap again to close the trunk.") {
+        launchCommand("Closing the trunk…") {
+            applyReading(commander.closeTrunk(requireVin()), battery = null, banner = "Close command sent.")
         }
     }
 
@@ -372,6 +380,7 @@ class WatchKeyViewModel(app: Application) : AndroidViewModel(app) {
             lockLabel = lock.label,
             asleep = lock.asleep,
             trunkOpen = lock.trunkOpen,
+            rearTrunk = lock.rearTrunk,
             frunkOpen = lock.frunkOpen,
             batteryLabel = when {
                 battery != null -> "Battery $battery%"

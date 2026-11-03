@@ -282,6 +282,29 @@ class ProtocolVectorTest {
             Vcsec.ClosureMoveType_E.CLOSURE_MOVE_TYPE_OPEN,
             trunk.getClosureMoveRequest().getRearTrunk(),
         )
+        val close = Vcsec.UnsignedMessage.parseFrom(VcsecCommands.closeTrunk())
+        assertEquals(
+            Vcsec.ClosureMoveType_E.CLOSURE_MOVE_TYPE_CLOSE,
+            close.getClosureMoveRequest().getRearTrunk(),
+        )
+        assertEquals(
+            com.myen88.wearkey.protocol.message.RearTrunk.OPEN,
+            com.myen88.wearkey.protocol.message.VcsecInterpret.rearTrunk(
+                Vcsec.ClosureState_E.CLOSURESTATE_OPEN,
+            ),
+        )
+        assertEquals(
+            com.myen88.wearkey.protocol.message.RearTrunk.CLOSED,
+            com.myen88.wearkey.protocol.message.VcsecInterpret.rearTrunk(
+                Vcsec.ClosureState_E.CLOSURESTATE_CLOSED,
+            ),
+        )
+        assertEquals(
+            com.myen88.wearkey.protocol.message.RearTrunk.UNKNOWN,
+            com.myen88.wearkey.protocol.message.VcsecInterpret.rearTrunk(
+                Vcsec.ClosureState_E.CLOSURESTATE_UNKNOWN,
+            ),
+        )
         val added = Vcsec.UnsignedMessage.parseFrom(
             VcsecCommands.addKey(CLIENT_PUBLIC.hexToBytes(), Keys.Role.ROLE_OWNER, Vcsec.KeyFormFactor.KEY_FORM_FACTOR_ANDROID_DEVICE),
         )

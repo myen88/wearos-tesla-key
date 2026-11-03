@@ -71,7 +71,7 @@ The fingerprint on the watch is the first 8 bytes of SHA-1 of the uncompressed p
 ## Controls
 
 - Unlock, lock, and Drive (remote start, second tap). Prefer PIN to Drive on the car.
-- Open trunk, open frunk. The second tap sends the command, so a stray tap does not pop the trunk. The command is `CLOSURE_MOVE_TYPE_OPEN`, not a toggle.
+- Open trunk, or Close trunk when VCSEC reports the rear trunk open (ajar, opening, closing, or unlatched). The second tap sends `CLOSURE_MOVE_TYPE_OPEN` or `CLOSURE_MOVE_TYPE_CLOSE`. Until a status has been read, or the car reports the trunk state as unknown, both buttons are shown. The frunk stays open-only: on Model 3, Y, S, and X the frunk hood latches by hand and does not power-close.
 - Climate on and climate off (infotainment).
 - Refresh reads VCSEC closure status and, if infotainment answers, battery percent (`battery_level`, otherwise `usable_battery_level`).
 - The Watch Key tile has Unlock and Lock. The Unlock complication does the same. Both open this app and send the command. That is one tap, and the watch has to be in BLE range. It is not walk-up unlock.
@@ -297,7 +297,7 @@ Application code is MIT. See `LICENSE`.
 
 - Auto key's phone-key challenge reply is speculative. The RSSI fallback is the part that does not depend on the car cooperating. See Auto key.
 - One car. The VIN is fixed after pairing until you remove the key on the watch and pair again.
-- Trunk and frunk are open commands. Closing them is not in this build.
+- The frunk is open-only. Power close is the rear trunk, and only when the car reports that lid open.
 - Climate and battery depend on the infotainment computer being awake. Failure there does not block lock and unlock.
 - The car can still have executed a command if the response is lost. Lock and unlock are safe to retry. The app retries once on a session-counter or epoch mismatch, and once if VCSEC says it is busy.
 - English UI only.

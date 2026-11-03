@@ -27,6 +27,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.myen88.wearkey.protocol.message.RearTrunk
 import androidx.wear.compose.foundation.lazy.AutoCenteringParams
 import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
 import androidx.wear.compose.foundation.lazy.ScalingLazyListItemScope
@@ -203,7 +204,18 @@ fun WatchApp(
                         }
                         item { ActionChip("Unlock", primary = true, enabled = !state.busy, onClick = model::unlock) }
                         item { ActionChip("Lock", enabled = !state.busy, onClick = model::lock) }
-                        item { ActionChip("Open trunk", enabled = !state.busy, onClick = model::trunk) }
+                        when (state.rearTrunk) {
+                            RearTrunk.OPEN -> item {
+                                ActionChip("Close trunk", enabled = !state.busy, onClick = model::closeTrunk)
+                            }
+                            RearTrunk.CLOSED -> item {
+                                ActionChip("Open trunk", enabled = !state.busy, onClick = model::trunk)
+                            }
+                            RearTrunk.UNKNOWN -> {
+                                item { ActionChip("Open trunk", enabled = !state.busy, onClick = model::trunk) }
+                                item { ActionChip("Close trunk", enabled = !state.busy, onClick = model::closeTrunk) }
+                            }
+                        }
                         item { ActionChip("Open frunk", enabled = !state.busy, onClick = model::frunk) }
                         item { ActionChip("Climate on", enabled = !state.busy) { model.climate(true) } }
                         item { ActionChip("Climate off", enabled = !state.busy) { model.climate(false) } }

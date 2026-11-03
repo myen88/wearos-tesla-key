@@ -135,6 +135,8 @@ object VcsecCommands {
 
     fun openTrunk(): ByteArray = closure { setRearTrunk(Vcsec.ClosureMoveType_E.CLOSURE_MOVE_TYPE_OPEN) }
 
+    fun closeTrunk(): ByteArray = closure { setRearTrunk(Vcsec.ClosureMoveType_E.CLOSURE_MOVE_TYPE_CLOSE) }
+
     fun openFrunk(): ByteArray = closure { setFrontTrunk(Vcsec.ClosureMoveType_E.CLOSURE_MOVE_TYPE_OPEN) }
 
     fun addKey(
@@ -231,10 +233,13 @@ sealed class VcsecRead {
     data object Ignore : VcsecRead()
 }
 
+enum class RearTrunk { OPEN, CLOSED, UNKNOWN }
+
 data class LockSnapshot(
     val label: String,
     val locked: Boolean?,
     val trunkOpen: Boolean,
+    val rearTrunk: RearTrunk,
     val frunkOpen: Boolean,
     val asleep: Boolean?,
 )
@@ -317,6 +322,7 @@ object VcsecInterpret {
 
     fun lockSnapshot(status: Vcsec.VehicleStatus): LockSnapshot {
         val closures = status.getClosureStatuses()
+        val rear = rearTrunk(closures.getRearTrunk())
         return LockSnapshot(
             label = lockLabel(status.getVehicleLockState()),
             locked = when (status.getVehicleLockState()) {
@@ -328,7 +334,8 @@ object VcsecInterpret {
                 -> false
                 else -> null
             },
-            trunkOpen = isOpen(closures.getRearTrunk()),
+            trunkOpen = rear == RearTrunk.OPEN,
+            rearTrunk = rear,
             frunkOpen = isOpen(closures.getFrontTrunk()),
             asleep = when (status.getVehicleSleepStatus()) {
                 Vcsec.VehicleSleepStatus_E.VEHICLE_SLEEP_STATUS_ASLEEP -> true
@@ -344,6 +351,17 @@ object VcsecInterpret {
         Vcsec.VehicleLockState_E.VEHICLELOCKSTATE_INTERNAL_LOCKED -> "Locked inside"
         Vcsec.VehicleLockState_E.VEHICLELOCKSTATE_SELECTIVE_UNLOCKED -> "Selective unlock"
         else -> "Lock unknown"
+    }
+
+    fun rearTrunk(state: Vcsec.ClosureState_E): RearTrunk = when (state) {
+        Vcsec.ClosureState_E.CLOSURESTATE_OPEN,
+        Vcsec.ClosureState_E.CLOSURESTATE_AJAR,
+        Vcsec.ClosureState_E.CLOSURESTATE_OPENING,
+        Vcsec.ClosureState_E.CLOSURESTATE_CLOSING,
+        Vcsec.ClosureState_E.CLOSURESTATE_FAILED_UNLATCH,
+        -> RearTrunk.OPEN
+        Vcsec.ClosureState_E.CLOSURESTATE_CLOSED -> RearTrunk.CLOSED
+        else -> RearTrunk.UNKNOWN
     }
 
     private fun isOpen(state: Vcsec.ClosureState_E): Boolean = when (state) {

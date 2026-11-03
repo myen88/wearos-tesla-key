@@ -108,6 +108,14 @@ class VehicleCommander(
         }
     }
 
+    suspend fun closeTrunk(vin: String): LockSnapshot = retryBusy {
+        onCar(vin) { link ->
+            val live = Live(link, vin)
+            live.closure(VcsecCommands.closeTrunk())
+            live.status()
+        }
+    }
+
     suspend fun openFrunk(vin: String): LockSnapshot = retryBusy {
         onCar(vin) { link ->
             val live = Live(link, vin)
