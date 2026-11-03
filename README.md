@@ -95,19 +95,21 @@ The official vehicle-command protos at the pinned commit do not define the phone
 - The AES key is the vehicle-command session key, `SHA-1(ECDH X)[:16]`. Older write-ups say "the ECDH shared secret" and do not spell out the SHA-1 step.
 - The nonce is 12 bytes, with the 4-byte counter in the last four bytes. The public notes only say the counter is four bytes. Java's AES-GCM wants a 12-byte nonce.
 - `keyId` is the first four bytes of SHA-1 of the watch public key, which those write-ups do agree on.
-- The level in the reply is the level the car asked for when the smoothed RSSI is at or above the near line, and `NONE` otherwise. The distance field is a hint derived from RSSI, not a measured range.
+- The level in the reply is the level the car asked for only when a fresh reading (under 2 seconds old) has a smoothed RSSI at or above the near line. Zero, missing, stale, or positive readings are far, and the reply is `NONE` with a long distance hint. The distance field is a hint derived from RSSI, not a measured range.
 
 If the car ignores that reply, it will not treat the watch as a present phone key no matter how long the GATT link stays up. That is the likely outcome on firmware that only speaks the newer session protocol. Treat "the car shows this key as connected" as something you have to check on your own car.
 
 ### Signal fallback
 
-When "Signal unlock" is on (the default once Auto key is on), the watch also sends an authenticated RKE unlock or lock from RSSI:
+When "Signal unlock" is on (the default once Auto key is on), the watch also sends an authenticated RKE unlock or lock from RSSI. The link is polled about once a second with a balanced connection interval. Defaults are Near -65 dBm and Far -85 dBm. A Pixel Watch 2 at the driver door is often -60 to -75, so if the status stays on far while you are at the door, tap Near to step it to -70, -75, or -80. Far stays at least 10 dB below Near.
 
-- Samples are averaged.
-- Crossing the near threshold sends one unlock. It will not unlock again until it has locked.
-- Staying at or below the far threshold for the hold time sends one lock. A short dip does not.
-- Commands are at least four seconds apart. A command that was rate-limited is sent later only if the watch is still on that side of the threshold.
-- Near, far, and hold are on the Auto key screen, next to a live RSSI line, so you can calibrate beside the car. Near must be a stronger signal than far. Tapping Near steps it; tapping Far steps the other way.
+- RSSI is dBm and must be negative. `0`, a positive value, `Int.MAX_VALUE`, and a failed read are far. They never unlock and they do not satisfy the phone-key challenge.
+- Unlock needs 3 fresh near samples in a row, each within 2 seconds of the last. The average that counts is those near samples, not an older far reading still in the display window.
+- One unlock per approach. The latch clears only after a walk-away lock or a Lock tap. Connecting again does not clear it. If VehicleStatus already says unlocked, the command is not sent and the log says "skipped, already unlocked".
+- At most 2 unlock commands are sent in any 5 minute window. A skip does not count.
+- One lock per departure, and only after the watch has been near or an Unlock tap. A fresh connection that only sees far RSSI does not lock, and neither does another far sample after the lock has been sent. Connecting again does not arm a second lock. If VehicleStatus already says locked, the command is not sent and the log says "skipped, already locked". That is what stops the lock chirp while you are away.
+- The notification and the line on the Auto key screen say what is happening: Scanning, Reconnecting, Connected far (RSSI x), Near (RSSI x), Unlock sent at hh:mm, or a skipped line. Scanning is not called unlocking.
+- Recent Auto key events on that screen keeps the last 20 lines (time, RSSI, action, result), including skips.
 
 This fallback does not make the car display the key as connected. It just sends the same lock and unlock the buttons send.
 
@@ -283,7 +285,7 @@ The car advertises an Apple iBeacon next to the `S…C` local name. Scanning wit
 ./gradlew :protocol:test
 ```
 
-Covered without a car: advertisement name `S1a87a5a75f3df858C` for VIN `5YJS0000000000000`, parsing complete and shortened local names, case-insensitive Tesla-name matching, the spec's ECDH key `1b2fce19967b79db696f909cff89ea9a`, session-info HMAC, HVAC AES-GCM ciphertext, routable-message fields, unlock's zero enum still on the wire, whitelist and lock-state parsing, frame reassembly, the response counter window, VIN check digits, the RSSI hysteresis state machine, and a round-trip of the speculative phone-key challenge encoding.
+Covered without a car: advertisement name `S1a87a5a75f3df858C` for VIN `5YJS0000000000000`, parsing complete and shortened local names, case-insensitive Tesla-name matching, the spec's ECDH key `1b2fce19967b79db696f909cff89ea9a`, session-info HMAC, HVAC AES-GCM ciphertext, routable-message fields, unlock's zero enum still on the wire, whitelist and lock-state parsing, frame reassembly, the response counter window, VIN check digits, the RSSI state machine (zero, missing, and stale readings never unlock; 3 near samples are required; 2 unlocks per 5 minutes; a reconnect keeps both latches; far-only samples never lock; one lock per departure; one unlock per approach; manual lock and unlock move the latches; VehicleStatus skips a command the car already has), and a round-trip of the speculative phone-key challenge encoding.
 
 Not covered: GATT on a watch, Android Keystore, card-tap timing, or whether a given firmware build accepts the Android-device form factor. Compare a failure with `tesla-control -ble -debug` from vehicle-command if you need a byte-level diff. Do not log or enroll the test keys.
 

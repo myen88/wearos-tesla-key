@@ -30,6 +30,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.myen88.wearkey.protocol.message.RearTrunk
 import androidx.wear.compose.foundation.lazy.AutoCenteringParams
 import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
+import androidx.wear.compose.foundation.lazy.items
 import androidx.wear.compose.foundation.lazy.ScalingLazyListItemScope
 import androidx.wear.compose.foundation.lazy.rememberScalingLazyListState
 import androidx.wear.compose.material.Chip
@@ -254,6 +255,30 @@ fun WatchApp(
                                     enabled = !state.busy,
                                     onClick = model::toggleRssiFallback,
                                 )
+                            }
+                            item {
+                                Text(
+                                    "Recent Auto key events",
+                                    style = MaterialTheme.typography.caption2,
+                                    color = MaterialTheme.colors.onSurfaceVariant,
+                                )
+                            }
+                            if (state.autoLog.isEmpty()) {
+                                item {
+                                    Text(
+                                        "None yet.",
+                                        style = MaterialTheme.typography.caption2,
+                                        color = MaterialTheme.colors.onSurfaceVariant,
+                                    )
+                                }
+                            } else {
+                                items(state.autoLog) { line ->
+                                    Text(
+                                        line,
+                                        style = MaterialTheme.typography.caption2,
+                                        color = MaterialTheme.colors.onSurfaceVariant,
+                                    )
+                                }
                             }
                         }
                         item {

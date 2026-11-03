@@ -65,6 +65,9 @@ interface VehicleLink {
     fun isConnected(): Boolean
 
     suspend fun preferLowPower()
+
+    /** Balanced connection interval so RSSI polls stay available. */
+    suspend fun preferBalanced()
 }
 
 class TeslaBleClient(context: Context) {
@@ -353,6 +356,10 @@ private class GattLink(
 
     override suspend fun preferLowPower() {
         onGatt { gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER) }
+    }
+
+    override suspend fun preferBalanced() {
+        onGatt { gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED) }
     }
 
     override suspend fun exchange(

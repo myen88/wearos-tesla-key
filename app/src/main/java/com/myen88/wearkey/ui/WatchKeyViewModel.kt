@@ -22,6 +22,7 @@ import com.myen88.wearkey.protocol.crypto.ProtocolException
 import com.myen88.wearkey.protocol.message.LockSnapshot
 import com.myen88.wearkey.protocol.message.RearTrunk
 import com.myen88.wearkey.session.AutoKeyBus
+import com.myen88.wearkey.session.AutoKeyLog
 import com.myen88.wearkey.session.AutoKeyService
 import com.myen88.wearkey.session.CommandForegroundService
 import com.myen88.wearkey.tile.KeyTileService
@@ -61,6 +62,7 @@ data class UiState(
     val farRssi: Int = -85,
     val farHoldSeconds: Int = 8,
     val liveRssi: String = "RSSI —",
+    val autoLog: List<String> = emptyList(),
     val nearby: List<NearbyRow> = emptyList(),
     val nearbyExpected: String = "",
     val nearbyMatch: Boolean = false,
@@ -82,14 +84,12 @@ class WatchKeyViewModel(app: Application) : AndroidViewModel(app) {
     init {
         viewModelScope.launch {
             AutoKeyBus.detail.collect { detail ->
-                val rssi = AutoKeyBus.rssi.value
-                val smoothed = AutoKeyBus.smoothed.value
-                val live = if (rssi == Int.MIN_VALUE) {
-                    detail
-                } else {
-                    "RSSI $rssi   avg $smoothed"
-                }
-                _state.value = _state.value.copy(liveRssi = live)
+                _state.value = _state.value.copy(liveRssi = detail)
+            }
+        }
+        viewModelScope.launch {
+            AutoKeyLog.lines.collect { lines ->
+                _state.value = _state.value.copy(autoLog = lines)
             }
         }
     }
@@ -270,15 +270,19 @@ class WatchKeyViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stepNear() {
-        val next = if (store.nearRssi >= -48) -78 else store.nearRssi + 3
+        val choices = listOf(-60, -65, -70, -75, -80)
+        val next = choices.firstOrNull { it < store.nearRssi } ?: choices.first()
         store.nearRssi = next
-        if (store.farRssi >= next) store.farRssi = next - 12
+        if (store.farRssi > next - 10) store.farRssi = (next - 20).coerceAtLeast(-95)
         _state.value = _state.value.copy(nearRssi = store.nearRssi, farRssi = store.farRssi)
     }
 
     fun stepFar() {
-        val next = if (store.farRssi <= -100) store.nearRssi - 8 else store.farRssi - 3
-        store.farRssi = next.coerceAtMost(store.nearRssi - 5)
+        val choices = listOf(-80, -85, -90, -95).filter { it <= store.nearRssi - 10 }
+        store.farRssi = when {
+            choices.isEmpty() -> store.nearRssi - 15
+            else -> choices.firstOrNull { it < store.farRssi } ?: choices.first()
+        }
         _state.value = _state.value.copy(farRssi = store.farRssi)
     }
 
@@ -420,6 +424,8 @@ class WatchKeyViewModel(app: Application) : AndroidViewModel(app) {
             nearRssi = store.nearRssi,
             farRssi = store.farRssi,
             farHoldSeconds = store.farHoldSeconds,
+            liveRssi = if (store.autoKey) AutoKeyBus.detail.value else "Off",
+            autoLog = AutoKeyLog.lines.value,
         )
     }
 

@@ -17,6 +17,8 @@ import com.myen88.wearkey.domain.AutoKeyListener
 import com.myen88.wearkey.domain.RadioGate
 import com.myen88.wearkey.domain.VehicleCommander
 import com.myen88.wearkey.keystore.AndroidKeystoreKey
+import com.myen88.wearkey.protocol.presence.PresenceConfig
+import com.myen88.wearkey.protocol.presence.PresenceController
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -70,6 +72,8 @@ class AutoKeyService : Service() {
 
     private suspend fun runLoop(store: WatchKeyStore) {
         val commander = VehicleCommander(TeslaBleClient(this), AndroidKeystoreKey(), store)
+        val presence = PresenceController(PresenceConfig())
+        AutoKeyPresence.controller = presence
         val listener = AutoKeyListener { rssi, smoothed, connected, detail ->
             AutoKeyBus.rssi.value = rssi
             AutoKeyBus.smoothed.value = smoothed
@@ -79,6 +83,7 @@ class AutoKeyService : Service() {
             manager.notify(NOTIFICATION_ID, notification(detail))
         }
         var backoff = 1_000L
+        try {
         while (scope.isActive && store.autoKey) {
             if (RadioGate.yieldBackground) {
                 listener.onSample(AutoKeyBus.rssi.value, AutoKeyBus.smoothed.value, false, "Paused for a command")
@@ -88,17 +93,22 @@ class AutoKeyService : Service() {
             val vin = store.vin
             if (vin.isNullOrBlank() || !store.enrolled) break
             try {
-                commander.maintain(vin, listener)
+                listener.onSample(Int.MIN_VALUE, Int.MIN_VALUE, false, "Scanning")
+                commander.maintain(vin, listener, presence)
                 backoff = 1_000L
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                listener.onSample(Int.MIN_VALUE, Int.MIN_VALUE, false, error.message ?: "Reconnecting")
+                AutoKeyLog.add(Int.MIN_VALUE, "Link", error.message ?: "reconnecting")
+                listener.onSample(Int.MIN_VALUE, Int.MIN_VALUE, false, "Reconnecting")
                 delay(backoff)
                 backoff = (backoff * 2).coerceAtMost(30_000L)
                 continue
             }
             delay(1_000)
+        }
+        } finally {
+            if (AutoKeyPresence.controller === presence) AutoKeyPresence.controller = null
         }
         stopSelf()
     }

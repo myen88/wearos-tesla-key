@@ -23,7 +23,10 @@ import com.myen88.wearkey.protocol.message.VcsecRead
 import com.myen88.wearkey.protocol.presence.PresenceCommand
 import com.myen88.wearkey.protocol.presence.PresenceConfig
 import com.myen88.wearkey.protocol.presence.PresenceController
+import com.myen88.wearkey.protocol.presence.PresenceGate
 import com.myen88.wearkey.protocol.randomBytes
+import com.myen88.wearkey.session.AutoKeyLog
+import com.myen88.wearkey.session.AutoKeyPresence
 import com.tesla.generated.universalmessage.UniversalMessage
 import com.tesla.generated.vcsec.Vcsec
 import kotlinx.coroutines.delay
@@ -88,6 +91,7 @@ class VehicleCommander(
         onCar(vin) { link ->
             val live = Live(link, vin)
             live.rke(Vcsec.RKEAction_E.RKE_ACTION_LOCK)
+            AutoKeyPresence.controller?.noteManualLock()
             live.status()
         }
     }
@@ -96,6 +100,7 @@ class VehicleCommander(
         onCar(vin) { link ->
             val live = Live(link, vin)
             live.rke(Vcsec.RKEAction_E.RKE_ACTION_UNLOCK)
+            AutoKeyPresence.controller?.noteManualUnlock()
             live.status()
         }
     }
@@ -154,12 +159,12 @@ class VehicleCommander(
         }
     }
 
-    suspend fun maintain(vin: String, listener: AutoKeyListener) {
+    suspend fun maintain(vin: String, listener: AutoKeyListener, presence: PresenceController) {
         if (!RadioGate.mutex.tryLock()) return
         try {
             if (RadioGate.yieldBackground || !store.autoKey) return
             ble.use(vin, patient = true) { link ->
-                Live(link, vin).presenceLoop(listener)
+                Live(link, vin).presenceLoop(listener, presence)
             }
         } finally {
             if (RadioGate.mutex.isLocked) RadioGate.mutex.unlock()
@@ -292,35 +297,101 @@ class VehicleCommander(
             return session
         }
 
-        suspend fun presenceLoop(listener: AutoKeyListener) {
+        private var statusHold: String? = null
+        private var statusHoldUntil = 0L
+
+        suspend fun presenceLoop(listener: AutoKeyListener, presence: PresenceController) {
+            listener.onSample(Int.MIN_VALUE, Int.MIN_VALUE, false, "Scanning")
             handshake(vcsec)
-            link.preferLowPower()
-            var presence = controller()
-            var configKey = configKey()
+            link.preferBalanced()
+            presence.updateConfig(presenceConfig())
+            presence.onLinkRestart()
+            AutoKeyLog.add(Int.MIN_VALUE, "Link", "connected")
+            listener.onSample(Int.MIN_VALUE, Int.MIN_VALUE, true, "Connected, no RSSI")
             while (coroutineContext.isActive && store.autoKey && !RadioGate.yieldBackground && link.isConnected()) {
-                val currentKey = configKey()
-                if (currentKey != configKey) {
-                    configKey = currentKey
-                    presence = controller()
-                }
+                presence.updateConfig(presenceConfig())
                 val rssi = link.readRssi()
-                if (rssi != Int.MIN_VALUE && store.rssiFallback) {
-                    when (presence.onRssi(rssi, System.currentTimeMillis())) {
-                        PresenceCommand.UNLOCK -> rke(Vcsec.RKEAction_E.RKE_ACTION_UNLOCK)
-                        PresenceCommand.LOCK -> rke(Vcsec.RKEAction_E.RKE_ACTION_LOCK)
-                        null -> Unit
+                val now = System.currentTimeMillis()
+                val command = presence.onRssi(rssi, now, emitCommands = store.rssiFallback)
+                val shown = if (PresenceController.isPlausible(rssi)) rssi else Int.MIN_VALUE
+                val freshNear = presence.isFreshNear(now)
+                val held = statusHold?.takeIf { now < statusHoldUntil }
+                listener.onSample(
+                    rssi = shown,
+                    smoothed = presence.smoothed ?: Int.MIN_VALUE,
+                    connected = true,
+                    detail = held ?: presenceDetail(shown, freshNear, presence.suppressReason),
+                )
+                when (command) {
+                    PresenceCommand.UNLOCK -> sendPresenceCommand(listener, presence, shown, "Unlock") {
+                        rke(Vcsec.RKEAction_E.RKE_ACTION_UNLOCK)
+                    }
+                    PresenceCommand.LOCK -> sendPresenceCommand(listener, presence, shown, "Lock") {
+                        rke(Vcsec.RKEAction_E.RKE_ACTION_LOCK)
+                    }
+                    null -> if (presence.suppressReason == "rate") {
+                        AutoKeyLog.add(shown, "Unlock", "blocked, 2 per 5 min")
                     }
                 }
-                val smoothed = presence.smoothed ?: rssi
-                listener.onSample(
-                    rssi = rssi,
-                    smoothed = smoothed,
-                    connected = true,
-                    detail = if (rssi == Int.MIN_VALUE) "Connected" else "Connected  RSSI $rssi",
-                )
-                val frame = link.poll(800.milliseconds) ?: continue
-                answerChallenge(frame, (presence.smoothed ?: -100) >= store.nearRssi, smoothed)
+                val frame = link.poll(1.seconds) ?: continue
+                answerChallenge(frame, presence.isFreshNear(System.currentTimeMillis()), shown)
             }
+        }
+
+        private suspend fun sendPresenceCommand(
+            listener: AutoKeyListener,
+            presence: PresenceController,
+            rssi: Int,
+            action: String,
+            block: suspend () -> Unit,
+        ) {
+            val stamp = java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
+            val command = if (action == "Lock") PresenceCommand.LOCK else PresenceCommand.UNLOCK
+            val vehicleLocked = try {
+                status().locked
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                AutoKeyLog.add(rssi, action, "status unread")
+                null
+            }
+            when (PresenceController.gate(command, vehicleLocked)) {
+                PresenceGate.SKIP_LOCKED -> {
+                    reportPresence(listener, rssi, presence, "Lock skipped, already locked")
+                    AutoKeyLog.add(rssi, "Lock", "skipped, already locked")
+                    return
+                }
+                PresenceGate.SKIP_UNLOCKED -> {
+                    reportPresence(listener, rssi, presence, "Unlock skipped, already unlocked")
+                    AutoKeyLog.add(rssi, "Unlock", "skipped, already unlocked")
+                    return
+                }
+                PresenceGate.SEND -> Unit
+            }
+            try {
+                block()
+                if (command == PresenceCommand.UNLOCK) presence.commitSentUnlock(System.currentTimeMillis())
+                val sent = "$action sent at $stamp"
+                reportPresence(listener, rssi, presence, sent)
+                AutoKeyLog.add(rssi, action, "sent at $stamp")
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                statusHold = null
+                AutoKeyLog.add(rssi, action, error.message ?: "failed")
+                listener.onSample(rssi, presence.smoothed ?: rssi, link.isConnected(), "$action failed")
+            }
+        }
+
+        private fun reportPresence(
+            listener: AutoKeyListener,
+            rssi: Int,
+            presence: PresenceController,
+            text: String,
+        ) {
+            statusHold = text
+            statusHoldUntil = System.currentTimeMillis() + 12_000
+            listener.onSample(rssi, presence.smoothed ?: rssi, true, text)
         }
 
         private suspend fun answerChallenge(frame: ByteArray, near: Boolean, rssi: Int) {
@@ -329,16 +400,26 @@ class VehicleCommander(
             val session = session(vcsec)
             val level = PassiveAuth.responseLevel(challenge.requestedLevel, near)
             val counter = store.passiveCounter
+            val distance = if (near && PresenceController.isPlausible(rssi)) {
+                PassiveAuth.distanceHint(rssi)
+            } else {
+                5_000
+            }
             val response = PassiveAuth.signedResponse(
                 sharedKey = session.sharedKey,
                 counter = counter,
                 publicKey = key.publicUncompressed(),
                 token = challenge.token,
                 level = level,
-                estimatedDistance = PassiveAuth.distanceHint(rssi),
+                estimatedDistance = distance,
             )
             store.passiveCounter = counter + 1
             link.send(response)
+            if (level == PassiveAuth.LEVEL_NONE) {
+                AutoKeyLog.add(rssi, "Challenge", "denied, not near")
+            } else {
+                AutoKeyLog.add(rssi, "Challenge", "granted level $level")
+            }
         }
 
         private fun notePassiveCounter(frame: ByteArray) {
@@ -356,15 +437,21 @@ class VehicleCommander(
             }
         }
 
-        private fun controller(): PresenceController = PresenceController(
-            PresenceConfig(
-                nearRssi = store.nearRssi,
-                farRssi = store.farRssi.coerceAtMost(store.nearRssi - 5),
-                farHoldMillis = store.farHoldSeconds.coerceIn(3, 60) * 1000L,
-            ),
+        private fun presenceConfig(): PresenceConfig = PresenceConfig(
+            nearRssi = store.nearRssi.coerceAtMost(-50),
+            farRssi = store.farRssi.coerceAtMost(store.nearRssi - 5).coerceAtLeast(-110),
+            farHoldMillis = store.farHoldSeconds.coerceIn(3, 60) * 1000L,
         )
 
-        private fun configKey(): String = "${store.nearRssi}:${store.farRssi}:${store.farHoldSeconds}:${store.rssiFallback}"
+        private fun presenceDetail(rssi: Int, freshNear: Boolean, suppressed: String?): String {
+            val blocked = if (suppressed == "rate") ". Unlock blocked (2 per 5 min)" else ""
+            if (!PresenceController.isPlausible(rssi)) return "Connected, no RSSI$blocked"
+            return if (freshNear) {
+                "Near (RSSI $rssi)$blocked"
+            } else {
+                "Connected, far (RSSI $rssi)$blocked"
+            }
+        }
 
         private suspend fun unsignedStatus(): LockSnapshot? {
             val routing = randomBytes(TeslaProtocol.ADDRESS_LENGTH)
